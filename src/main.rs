@@ -1,3 +1,5 @@
+mod db;
+
 use axum::{Router, extract::Request, routing::any};
 use std::env;
 use tokio::net::TcpListener;
@@ -12,6 +14,19 @@ async fn main() {
     // Read PORT from environment variable, default to 3000
     let port = env::var("PORT").unwrap_or_else(|_| "3000".to_string());
     let addr = format!("0.0.0.0:{}", port);
+
+    // Initialize Database
+    info!("Initializing database...");
+    let _conn = match db::init_db().await {
+        Ok(conn) => {
+            info!("Database connection established.");
+            conn
+        }
+        Err(e) => {
+            error!("Failed to initialize database: {}", e);
+            return;
+        }
+    };
 
     // Create the router with a capture-all handler
     let app = Router::new()
