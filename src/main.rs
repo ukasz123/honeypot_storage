@@ -1,4 +1,10 @@
-use axum::{Router, body::Body, extract::State, http::Request, routing::any};
+use axum::{
+    Router,
+    body::Body,
+    extract::{ConnectInfo, State},
+    http::Request,
+    routing::any,
+};
 use sqlx::Row;
 use std::env;
 use tokio::net::TcpListener;
@@ -8,7 +14,7 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod db;
 
-type CapturedRequest = Request<Body>;
+type CapturedRequest = (Request<Body>, String);
 
 #[tokio::main]
 async fn main() {
@@ -51,7 +57,8 @@ async fn main() {
     let app = Router::new()
         .route("/", any(handler))
         .route("/*path", any(handler))
-        .with_state(tx);
+        .with_state(tx)
+        .into_make_service_with_connect_info::<std::net::SocketAddr>();
 
     info!("Listening on {}", addr);
 
@@ -70,9 +77,12 @@ async fn main() {
 
 async fn handler(
     State(tx): State<mpsc::Sender<CapturedRequest>>,
-    req: CapturedRequest,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    req: Request<Body>,
 ) -> axum::http::StatusCode {
-    if let Err(e) = tx.send(req).await {
+    let client_ip = addr.ip().to_string();
+
+    if let Err(e) = tx.send((req, client_ip)).await {
         error!("Failed to send request to worker: {}", e);
     }
 
@@ -85,8 +95,8 @@ async fn worker_loop(
     max_body_bytes: usize,
 ) {
     info!("Worker task started.");
-    while let Some(captured) = rx.recv().await {
-        if let Err(e) = save_request(&pool, captured, max_body_bytes).await {
+    while let Some((captured, client_ip)) = rx.recv().await {
+        if let Err(e) = save_request(&pool, captured, Some(client_ip), max_body_bytes).await {
             error!("Failed to save request to database: {}", e);
         }
     }
@@ -94,7 +104,8 @@ async fn worker_loop(
 
 async fn save_request(
     pool: &sqlx::SqlitePool,
-    req: CapturedRequest,
+    req: Request<Body>,
+    client_ip: Option<String>,
     max_body_bytes: usize,
 ) -> Result<(), sqlx::Error> {
     let tx = pool.begin().await?;
@@ -118,11 +129,6 @@ async fn save_request(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    // Note: In a real Axum app, the IP would be extracted via ConnectInfo<SocketAddr> in the handler.
-    // Since we are moving the Request object, we'd need to pass that info along if it were available.
-    // For now, we leave client_s_ip as None unless passed through.
-    let client_s_ip: Option<String> = None;
-
     let id: u32 = sqlx::query(
         "INSERT INTO requests (method, path, content_length, content_type, user_agent, client_s_ip)
          VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
@@ -132,7 +138,7 @@ async fn save_request(
     .bind(content_length)
     .bind(content_type)
     .bind(user_agent)
-    .bind(client_s_ip)
+    .bind(client_ip)
     .fetch_one(pool)
     .await?
     .get::<_, _>(0);
