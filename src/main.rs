@@ -31,8 +31,9 @@ async fn main() {
         .parse::<usize>()
         .unwrap_or(1024 * 1024);
 
-    // Read WORKER_THREADS from environment variable, default to 4
-    let worker_threads = env::var("WORKER_THREADS")
+    // Read MAX_CONCURRENT_WRITES from environment variable, default to 4
+    // This limits how many database write tasks are active at once via a Semaphore.
+    let max_concurrent_writes = env::var("MAX_CONCURRENT_WRITES")
         .unwrap_or_else(|_| "4".to_string())
         .parse::<usize>()
         .unwrap_or(4);
@@ -50,29 +51,38 @@ async fn main() {
         }
     };
 
-    // Create channel for background workers
-    let (tx, rx) = mpsc::channel::<CapturedRequest>(100);
-    let rx = std::sync::Arc::new(tokio::sync::Mutex::new(rx));
+    // Create channel for background dispatcher
+    let (tx, mut rx) = mpsc::channel::<CapturedRequest>(100);
 
-    // Spawn the worker tasks
-    for i in 0..worker_threads {
-        let worker_pool = pool.clone();
-        let rx_clone = rx.clone();
-        let max_body_bytes = max_body_bytes;
-        tokio::spawn(async move {
-            info!("Worker task {} started.", i);
-            while let Some((captured, client_ip)) = {
-                let mut lock = rx_clone.lock().await;
-                lock.recv().await
-            } {
+    // Semaphore to limit concurrent database write tasks
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent_writes));
+
+    // Spawn the dispatcher task
+    let worker_pool = pool.clone();
+    let semaphore_clone = semaphore.clone();
+    tokio::spawn(async move {
+        info!(
+            "Dispatcher task started. Max concurrent writes: {}",
+            max_concurrent_writes
+        );
+        while let Some((captured, client_ip)) = rx.recv().await {
+            let pool_inner = worker_pool.clone();
+            let semaphore_inner = semaphore_clone.clone();
+            let max_bytes = max_body_bytes;
+
+            tokio::spawn(async move {
+                // Acquire a permit before starting the write.
+                // This prevents unbounded task growth from overwhelming the DB or memory.
+                let _permit = semaphore_inner.acquire().await.expect("Semaphore closed");
+
                 if let Err(e) =
-                    save_request(&worker_pool, captured, Some(client_ip), max_body_bytes).await
+                    save_request(&pool_inner, captured, Some(client_ip), max_bytes).await
                 {
-                    error!("Worker {} failed to save request: {}", i, e);
+                    error!("Failed to save request to database: {}", e);
                 }
-            }
-        });
-    }
+            });
+        }
+    });
 
     // Create the router with a capture-all handler
     let app = Router::new()
