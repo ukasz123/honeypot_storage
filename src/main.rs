@@ -82,8 +82,13 @@ async fn handler(
 ) -> axum::http::StatusCode {
     let client_ip = addr.ip().to_string();
 
-    if let Err(e) = tx.send((req, client_ip)).await {
-        error!("Failed to send request to worker: {}", e);
+    // Use try_send for non-blocking behavior.
+    // If the channel is full, we drop the request to avoid backpressure/latency.
+    if let Err(e) = tx.try_send((req, client_ip)) {
+        error!(
+            "Failed to send request to worker (channel full or closed): {}",
+            e
+        );
     }
 
     axum::http::StatusCode::NO_CONTENT
