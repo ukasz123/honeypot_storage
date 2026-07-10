@@ -9,8 +9,8 @@ use sqlx::Row;
 use std::env;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use tracing::{error, info};
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing::{error, info, level_filters::LevelFilter};
+use tracing_subscriber::{Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod db;
 
@@ -19,7 +19,13 @@ type CapturedRequest = (Request<Body>, String);
 #[tokio::main]
 async fn main() {
     // Initialize tracing
-    tracing_subscriber::registry().with(fmt::layer()).init();
+    tracing_subscriber::registry()
+        .with(fmt::layer().with_filter(if cfg!(debug_assertions) {
+            LevelFilter::DEBUG
+        } else {
+            LevelFilter::INFO
+        }))
+        .init();
 
     // Read PORT from environment variable, default to 3000
     let port = env::var("PORT").unwrap_or_else(|_| "3000".to_string());
