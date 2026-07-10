@@ -31,6 +31,12 @@ async fn main() {
         .parse::<usize>()
         .unwrap_or(1024 * 1024);
 
+    // Read WORKER_THREADS from environment variable, default to 4
+    let worker_threads = env::var("WORKER_THREADS")
+        .unwrap_or_else(|_| "4".to_string())
+        .parse::<usize>()
+        .unwrap_or(4);
+
     // Initialize Database (using SqlitePool for better concurrency)
     info!("Initializing database...");
     let pool = match db::init_pool().await {
@@ -44,14 +50,29 @@ async fn main() {
         }
     };
 
-    // Create channel for background worker
+    // Create channel for background workers
     let (tx, rx) = mpsc::channel::<CapturedRequest>(100);
+    let rx = std::sync::Arc::new(tokio::sync::Mutex::new(rx));
 
-    // Spawn the worker task
-    let worker_pool = pool.clone();
-    tokio::spawn(async move {
-        worker_loop(rx, worker_pool, max_body_bytes).await;
-    });
+    // Spawn the worker tasks
+    for i in 0..worker_threads {
+        let worker_pool = pool.clone();
+        let rx_clone = rx.clone();
+        let max_body_bytes = max_body_bytes;
+        tokio::spawn(async move {
+            info!("Worker task {} started.", i);
+            while let Some((captured, client_ip)) = {
+                let mut lock = rx_clone.lock().await;
+                lock.recv().await
+            } {
+                if let Err(e) =
+                    save_request(&worker_pool, captured, Some(client_ip), max_body_bytes).await
+                {
+                    error!("Worker {} failed to save request: {}", i, e);
+                }
+            }
+        });
+    }
 
     // Create the router with a capture-all handler
     let app = Router::new()
@@ -83,7 +104,8 @@ async fn handler(
     let client_ip = addr.ip().to_string();
 
     // Use try_send for non-blocking behavior.
-    // If the channel is full, we drop the request to avoid backpressure/latency.
+    // If the channel is enough to handle spikes without dropping, we proceed.
+    // If it's full, we drop the request to avoid backpressure/latency.
     if let Err(e) = tx.try_send((req, client_ip)) {
         error!(
             "Failed to send request to worker (channel full or closed): {}",
