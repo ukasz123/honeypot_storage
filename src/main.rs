@@ -76,10 +76,19 @@ async fn main() {
             let semaphore_inner = semaphore_clone.clone();
             let max_bytes = max_body_bytes;
 
+            // We acquire the permit HERE in the dispatcher loop.
+            // If all permits are taken, this line will block, preventing the
+            // spawning of new tasks and stopping the channel from being drained
+            // until a slot becomes available.
+            let permit = semaphore_inner
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("Semaphore closed");
+
             tokio::spawn(async move {
-                // Acquire a permit before starting the write.
-                // This prevents unbounded task growth from overwhelming the DB or memory.
-                let _permit = semaphore_inner.acquire().await.expect("Semaphore closed");
+                // Move the permit into the task so it is released when the task drops.
+                let _permit = permit;
 
                 if let Err(e) =
                     save_request(&pool_inner, captured, Some(client_ip), max_bytes).await
