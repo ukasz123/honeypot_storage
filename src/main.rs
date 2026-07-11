@@ -140,21 +140,7 @@ async fn handler(
     axum::http::StatusCode::NO_CONTENT
 }
 
-async fn worker_loop(
-    mut rx: mpsc::Receiver<CapturedRequest>,
-    pool: sqlx::SqlitePool,
-    max_body_bytes: usize,
-) {
-    info!("Worker task started.");
-    while let Some((captured, client_ip)) = rx.recv().await {
-        if let Err(e) = save_request(&pool, captured, Some(client_ip), max_body_bytes).await {
-            error!("Failed to save request to database: {}", e);
-        } else {
-            info!("Request saved to database");
-        }
-    }
-}
-
+// Removed unused worker_loop function as it was redundant with the dispatcher task in main.
 async fn save_request(
     pool: &sqlx::SqlitePool,
     req: Request<Body>,
