@@ -161,9 +161,10 @@ async fn save_request(
     client_ip: Option<String>,
     max_body_bytes: usize,
 ) -> Result<(), sqlx::Error> {
-    let tx = pool.begin().await?;
+    // 1. Extract all metadata from the request before consuming it
+    let method = req.method().to_string();
+    let path = req.uri().path().to_string();
 
-    // Extract specific headers
     let content_length = req
         .headers()
         .get("content-length")
@@ -182,47 +183,52 @@ async fn save_request(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    let id: u32 = sqlx::query(
-        "INSERT INTO requests (method, path, content_length, content_type, user_agent, client_s_ip)
-         VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
-    )
-    .bind(req.method().to_string())
-    .bind(req.uri().path().to_string())
-    .bind(content_length)
-    .bind(content_type)
-    .bind(user_agent)
-    .bind(client_ip)
-    .fetch_one(pool)
-    .await?
-    .get::<_, _>(0);
-
-    for (name, value) in req
+    // Clone headers for the subsequent insertion loop
+    let headers: Vec<(String, String)> = req
         .headers()
         .iter()
         .map(|(n, v)| (n.to_string(), v.to_str().unwrap_or("").to_string()))
-        .collect::<Vec<_>>()
-    {
-        sqlx::query("INSERT INTO request_headers (request_id, name, value) VALUES (?, ?, ?)")
-            .bind(id)
-            .bind(name)
-            .bind(value)
-            .execute(pool)
-            .await?;
-    }
+        .collect();
 
-    // Extract and store the body
-    let bytes = crate::body_utils::collect_body_with_limit(req.into_body(), max_body_bytes)
+    // 2. Collect the body bytes (I/O intensive part) - DO NOT hold a transaction yet
+    let body_bytes = crate::body_utils::collect_body_with_limit(req.into_body(), max_body_bytes)
         .await
         .map_err(|e| {
             error!("Failed to read request body: {}", e);
             sqlx::Error::Protocol(format!("Body error: {}", e))
         })?;
 
-    if !bytes.is_empty() {
+    // 3. Now start the transaction only when we have all data ready to be written
+    let mut tx = pool.begin().await?;
+
+    let id: u32 = sqlx::query(
+        "INSERT INTO requests (method, path, content_length, content_type, user_agent, client_s_ip)
+         VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
+    )
+    .bind(method)
+    .bind(path)
+    .bind(content_length)
+    .bind(content_type)
+    .bind(user_agent)
+    .bind(client_ip)
+    .fetch_one(&mut *tx) // Use the transaction!
+    .await?
+    .get::<_, _>(0);
+
+    for (name, value) in headers {
+        sqlx::query("INSERT INTO request_headers (request_id, name, value) VALUES (?, ?, ?)")
+            .bind(id)
+            .bind(name)
+            .bind(value)
+            .execute(&mut *tx) // Use the transaction!
+            .await?;
+    }
+
+    if !body_bytes.is_empty() {
         sqlx::query("INSERT INTO request_bodies (request_id, body) VALUES (?, ?)")
             .bind(id)
-            .bind(bytes.to_vec())
-            .execute(pool)
+            .bind(body_bytes.to_vec())
+            .execute(&mut *tx) // Use the transaction!
             .await?;
     }
 
