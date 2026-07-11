@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use tracing::{error, info, level_filters::LevelFilter};
 use tracing_subscriber::{Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
+mod body_utils;
 mod db;
 
 type CapturedRequest = (Request<Body>, String);
@@ -40,9 +41,9 @@ async fn main() {
     // Read MAX_CONCURRENT_WRITES from environment variable, default to 4
     // This limits how many database write tasks are active at once via a Semaphore.
     let max_concurrent_writes = env::var("MAX_CONCURRENT_WRITES")
-        .unwrap_or_else(|_| "4".to_string())
+        .unwrap_or_else(|_| "2000".to_string())
         .parse::<usize>()
-        .unwrap_or(4);
+        .unwrap_or(2000);
 
     // Initialize Database (using SqlitePool for better concurrency)
     info!("Initializing database...");
@@ -62,10 +63,9 @@ async fn main() {
 
     // Semaphore to limit concurrent database write tasks
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent_writes));
+    let worker_pool = pool.clone();
 
     // Spawn the dispatcher task
-    let worker_pool = pool.clone();
-    let semaphore_clone = semaphore.clone();
     tokio::spawn(async move {
         info!(
             "Dispatcher task started. Max concurrent writes: {}",
@@ -73,7 +73,7 @@ async fn main() {
         );
         while let Some((captured, client_ip)) = rx.recv().await {
             let pool_inner = worker_pool.clone();
-            let semaphore_inner = semaphore_clone.clone();
+            let semaphore_inner = semaphore.clone();
             let max_bytes = max_body_bytes;
 
             // We acquire the permit HERE in the dispatcher loop.
@@ -81,7 +81,6 @@ async fn main() {
             // spawning of new tasks and stopping the channel from being drained
             // until a slot becomes available.
             let permit = semaphore_inner
-                .clone()
                 .acquire_owned()
                 .await
                 .expect("Semaphore closed");
@@ -150,6 +149,8 @@ async fn worker_loop(
     while let Some((captured, client_ip)) = rx.recv().await {
         if let Err(e) = save_request(&pool, captured, Some(client_ip), max_body_bytes).await {
             error!("Failed to save request to database: {}", e);
+        } else {
+            info!("Request saved to database");
         }
     }
 }
@@ -210,7 +211,7 @@ async fn save_request(
     }
 
     // Extract and store the body
-    let bytes = axum::body::to_bytes(req.into_body(), max_body_bytes)
+    let bytes = crate::body_utils::collect_body_with_limit(req.into_body(), max_body_bytes)
         .await
         .map_err(|e| {
             error!("Failed to read request body: {}", e);

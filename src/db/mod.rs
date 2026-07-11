@@ -1,13 +1,23 @@
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
+use std::env;
 use std::str::FromStr;
+use std::time::Duration;
 
 pub async fn init_pool() -> Result<SqlitePool, sqlx::Error> {
     let connection_options = SqliteConnectOptions::from_str("sqlite://storage.db")?
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal);
 
-    let pool = SqlitePool::connect_with(connection_options).await?;
+    let acquire_timeout_secs = env::var("DB_ACQUIRE_TIMEOUT_SECS")
+        .unwrap_or_else(|_| "30".to_string())
+        .parse::<u64>()
+        .unwrap_or(30);
+
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .acquire_timeout(Duration::from_secs(acquire_timeout_secs))
+        .connect_with(connection_options)
+        .await?;
 
     // Initialize schema
     sqlx::query(
