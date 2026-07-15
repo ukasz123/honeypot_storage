@@ -14,6 +14,8 @@ use tracing_subscriber::{Layer, fmt, layer::SubscriberExt, util::SubscriberInitE
 
 mod body_utils;
 mod db;
+use db::SqliteStorage;
+mod storage;
 
 type CapturedRequest = (Request<Body>, String);
 
@@ -45,9 +47,9 @@ async fn main() {
         .parse::<usize>()
         .unwrap_or(2000);
 
-    // Initialize Database (using SqlitePool for better concurrency)
+    // Initialize Database (using SqliteStorage for better concurrency)
     info!("Initializing database...");
-    let pool = match db::init_pool().await {
+    let pool = match SqliteStorage::new().await {
         Ok(p) => {
             info!("Database connection pool established.");
             p
@@ -142,7 +144,7 @@ async fn handler(
 
 // Removed unused worker_loop function as it was redundant with the dispatcher task in main.
 async fn save_request(
-    pool: &sqlx::SqlitePool,
+    storage: &SqliteStorage,
     req: Request<Body>,
     client_ip: Option<String>,
     max_body_bytes: usize,
@@ -185,7 +187,7 @@ async fn save_request(
         })?;
 
     // 3. Now start the transaction only when we have all data ready to be written
-    let mut tx = pool.begin().await?;
+    let mut tx = storage.pool.begin().await?;
 
     let id: u32 = sqlx::query(
         "INSERT INTO requests (method, path, content_length, content_type, user_agent, client_s_ip)
