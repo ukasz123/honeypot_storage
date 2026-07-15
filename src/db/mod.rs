@@ -1,18 +1,24 @@
+#[cfg(feature = "duckdb")]
+use duckdb::{Connection, Result as DuckResult};
+#[cfg(feature = "sqlite")]
+use sqlx::{Row, SqlitePool, sqlite::SqliteConnectOptions, sqlite::SqliteJournalMode};
+
 use super::storage::Storage;
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::Request;
-use sqlx::{Row, SqlitePool, sqlite::SqliteConnectOptions, sqlite::SqliteJournalMode};
 use std::env;
 use std::str::FromStr;
 use std::time::Duration;
 use tracing::error;
 
+#[cfg(feature = "sqlite")]
 #[derive(Clone)]
 pub struct SqliteStorage {
     pub pool: SqlitePool,
 }
 
+#[cfg(feature = "sqlite")]
 impl SqliteStorage {
     pub async fn new() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let connection_options = SqliteConnectOptions::from_str("sqlite://storage.db")?
@@ -35,6 +41,7 @@ impl SqliteStorage {
     }
 }
 
+#[cfg(feature = "sqlite")]
 #[async_trait]
 impl Storage for SqliteStorage {
     async fn init(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -159,6 +166,134 @@ impl Storage for SqliteStorage {
         }
 
         tx.commit().await?;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "duckdb")]
+pub struct DuckdbStorage {
+    conn: std::sync::Mutex<Connection>,
+}
+
+#[cfg(feature = "duckdb")]
+impl DuckdbStorage {
+    pub fn new() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let conn = Connection::open("storage.db")?;
+        Ok(Self {
+            conn: std::sync::Mutex::new(conn),
+        })
+    }
+}
+
+#[cfg(feature = "duckdb")]
+#[async_trait]
+impl Storage for DuckdbStorage {
+    async fn init(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS requests (
+                id INTEGER PRIMARY KEY,
+                method TEXT NOT NULL,
+                path TEXT NOT NULL,
+                content_length INTEGER,
+                content_type TEXT,
+                user_agent TEXT,
+                client_s_ip TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS request_headers (
+                id INTEGER PRIMARY KEY,
+                request_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                value TEXT,
+                FOREIGN KEY (request_id) REFERENCES requests (id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS request_bodies (
+                id INTEGER PRIMARY KEY,
+                request_id INTEGER NOT NULL,
+                body BLOB,
+                FOREIGN KEY (request_id) REFERENCES requests (id) ON DELETE CASCADE
+            );",
+        )?;
+        Ok(())
+    }
+
+    async fn save_request(
+        &self,
+        req: Request<Body>,
+        client_ip: Option<String>,
+        max_body_bytes: usize,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let method = req.method().to_string();
+        let path = req.uri().path().to_string();
+
+        let content_length = req
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<i64>().ok());
+
+        let content_type = req
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        let user_agent = req
+            .headers()
+            .get("user-agent")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        let headers: Vec<(String, String)> = req
+            .headers()
+            .iter()
+            .map(|(n, v)| (n.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+
+        let body_bytes =
+            crate::body_utils::collect_body_with_limit(req.into_body(), max_body_bytes)
+                .await
+                .map_err(|e| {
+                    error!("Failed to read request body: {}", e);
+                    format!("Body error: {}", e)
+                })?;
+
+        let conn = self.conn.lock().unwrap();
+
+        // DuckDB doesn't have a direct equivalent of 'RETURNING id' that works exactly the same in all versions via simple execute,
+        // but we can use it if supported or use a transaction and query back.
+        // For simplicity in this refactor, let's assume standard SQL approach.
+
+        conn.execute(
+            "INSERT INTO requests (method, path, content_length, contentint_type, user_agent, client_s_ip)
+             VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                &method,
+                &path,
+                content_length,
+                &content_type,
+                &user_agent,
+                &client_ip,
+            ),
+        )?;
+
+        let id: i64 = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
+
+        for (name, value) in headers {
+            conn.execute(
+                "INSERT INTO request_headers (request_id, name, value) VALUES (?, ?, ?)",
+                (id, &name, &value),
+            )?;
+        }
+
+        if !body_bytes.is_empty() {
+            conn.execute(
+                "INSERT INTO request_bodies (request_id, body) VALUES (?, ?)",
+                (id, &body_bytes),
+            )?;
+        }
+
         Ok(())
     }
 }

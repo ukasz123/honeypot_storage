@@ -1,3 +1,4 @@
+use crate::storage::Storage;
 use axum::{
     Router,
     body::Body,
@@ -5,22 +6,24 @@ use axum::{
     http::Request,
     routing::any,
 };
-use sqlx::Row;
 use std::env;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::{error, info, level_filters::LevelFilter};
 use tracing_subscriber::{Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt};
-
 mod body_utils;
 mod db;
+#[cfg(feature = "duckdb")]
+use db::DuckdbStorage;
+#[cfg(feature = "sqlite")]
 use db::SqliteStorage;
 mod storage;
 
 type CapturedRequest = (Request<Body>, String);
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialize tracing
     tracing_subscriber::registry()
         .with(fmt::layer().with_filter(if cfg!(debug_assertions) {
@@ -40,32 +43,35 @@ async fn main() {
         .parse::<usize>()
         .unwrap_or(1024 * 1024);
 
-    // Read MAX_CONCURRENT_WRITES from environment variable, default to 4
-    // This limits how many database write tasks are active at once via a Semaphore.
+    // Read MAX_CONCURRENT_WRITES from environment and default to 2000
     let max_concurrent_writes = env::var("MAX_CONCURRENT_WRITES")
         .unwrap_or_else(|_| "2000".to_string())
         .parse::<usize>()
         .unwrap_or(2000);
 
-    // Initialize Database (using SqliteStorage for better concurrency)
+    // Initialize Database
     info!("Initializing database...");
-    let pool = match SqliteStorage::new().await {
-        Ok(p) => {
-            info!("Database connection pool established.");
-            p
-        }
-        Err(e) => {
-            error!("Failed to initialize database: {}", e);
-            return;
-        }
-    };
+    #[cfg(feature = "sqlite")]
+    let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::new().await.map_err(|e| {
+        error!("Failed to initialize SQLite database: {}", e);
+        e as Box<dyn std::error::Error + Send + Sync>
+    })?);
+
+    #[cfg(feature = "duckdb")]
+    let storage: Arc<dyn Storage> = Arc::new(DuckdbStorage::new().map_err(|e| {
+        error!("Failed to initialize DuckDB database: {}", e);
+        e as Box<dyn std::error::Error + Send + Sync>
+    })?);
+
+    #[cfg(not(any(feature = "sqlite", feature = "duckdb")))]
+    panic!("No database feature enabled. Please enable 'sqlite' or 'duckdb' features.");
 
     // Create channel for background dispatcher
     let (tx, mut rx) = mpsc::channel::<CapturedRequest>(100);
 
     // Semaphore to limit concurrent database write tasks
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent_writes));
-    let worker_pool = pool.clone();
+    let worker_pool = storage.clone();
 
     // Spawn the dispatcher task
     tokio::spawn(async move {
@@ -74,7 +80,7 @@ async fn main() {
             max_concurrent_writes
         );
         while let Some((captured, client_ip)) = rx.recv().await {
-            let pool_inner = worker_pool.clone();
+            let storage_inner = worker_pool.clone();
             let semaphore_inner = semaphore.clone();
             let max_bytes = max_body_bytes;
 
@@ -92,7 +98,7 @@ async fn main() {
                 let _permit = permit;
 
                 if let Err(e) =
-                    save_request(&pool_inner, captured, Some(client_ip), max_bytes).await
+                    save_request(&storage_inner, captured, Some(client_ip), max_bytes).await
                 {
                     error!("Failed to save request to database: {}", e);
                 }
@@ -109,17 +115,13 @@ async fn main() {
 
     info!("Listening on {}", addr);
 
-    let listener = match TcpListener::bind(&addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            error!("Failed to bind to {}: {}", addr, e);
-            return;
-        }
-    };
+    let listener = TcpListener::bind(&addr).await?;
 
     if let Err(e) = axum::serve(listener, app).await {
         error!("Server error: {}", e);
     }
+
+    Ok(())
 }
 
 async fn handler(
@@ -144,11 +146,11 @@ async fn handler(
 
 // Removed unused worker_loop function as it was redundant with the dispatcher task in main.
 async fn save_request(
-    storage: &SqliteStorage,
+    storage: &dyn Storage,
     req: Request<Body>,
     client_ip: Option<String>,
     max_body_bytes: usize,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // 1. Extract all metadata from the request before consuming it
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
@@ -183,43 +185,22 @@ async fn save_request(
         .await
         .map_err(|e| {
             error!("Failed to read request body: {}", e);
-            sqlx::Error::Protocol(format!("Body error: {}", e))
+            e
         })?;
 
     // 3. Now start the transaction only when we have all data ready to be written
-    let mut tx = storage.pool.begin().await?;
+    storage
+        .save_request(
+            method,
+            path,
+            content_length,
+            content_type,
+            user_agent,
+            headers,
+            Some(body_bytes.to_vec()),
+            client_ip,
+        )
+        .await?;
 
-    let id: u32 = sqlx::query(
-        "INSERT INTO requests (method, path, content_length, content_type, user_agent, client_s_ip)
-         VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
-    )
-    .bind(method)
-    .bind(path)
-    .bind(content_length)
-    .bind(content_type)
-    .bind(user_agent)
-    .bind(client_ip)
-    .fetch_one(&mut *tx) // Use the transaction!
-    .await?
-    .get::<_, _>(0);
-
-    for (name, value) in headers {
-        sqlx::query("INSERT INTO request_headers (request_id, name, value) VALUES (?, ?, ?)")
-            .bind(id)
-            .bind(name)
-            .bind(value)
-            .execute(&mut *tx) // Use the transaction!
-            .await?;
-    }
-
-    if !body_bytes.is_empty() {
-        sqlx::query("INSERT INTO request_bodies (request_id, body) VALUES (?, ?)")
-            .bind(id)
-            .bind(body_bytes.to_vec())
-            .execute(&mut *tx) // Use the transaction!
-            .await?;
-    }
-
-    tx.commit().await?;
     Ok(())
 }
