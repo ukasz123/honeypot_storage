@@ -24,3 +24,11 @@ The project scaffolding and initial implementation were created quite quickly an
 When given an impossible task (my mistake), it never said that it was wrong and [kept trying until stopped](thread_dump/google/gemma-4-26b-a4b/08_Refactor%20Rust%20save_request%20avoiding%20clones.md).
 In general, code generation and thinking were rather slow compared to remote models. I could take some breaks even for rather small changes. Also, the model hallucinated a bit. It tended to come back to previous solutions even when they were rejected.
 I noticed that when running LLM backend laptop took additional 35-40W of electricity power.
+
+## DuckDB support
+### GLM 4.7 Flash ([conversations](/thread_dump/z.ai/glm-4.7-flash-mix))
+I decided to use different model and tested [glm-4.7-flash-mix](https://lmstudio.ai/models/zai-org/glm-4.7-flash) for planning but it was completely useless. It quickly started generating the same output again and again.
+### Back to Gemma-4
+When asked agent was able to prepare plan for adding support for DuckDB as alternative for SQLite. Process was split into two phases: refactoring of existing code - extracting trait for interacting with database and then adding feature and implementation backed by DuckDB. 
+Implementation of first phase went fairly well but some compilation errors were present. They were fixed in separate session to avoid context pollution.
+DuckDB support was added but implementation contained even more compilation errors and even tryin new sessions with prompt to fix compilation errors did not help and I eventually gave up on and decided to fix remaining issues by hand.
