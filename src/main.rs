@@ -66,6 +66,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     #[cfg(not(any(feature = "sqlite", feature = "duckdb")))]
     panic!("No database feature enabled. Please enable 'sqlite' or 'duckdb' features.");
 
+    storage
+        .init()
+        .await
+        .expect("Storage was unable to initialize");
+
     // Create channel for background dispatcher
     let (tx, mut rx) = mpsc::channel::<CapturedRequest>(100);
 
@@ -98,7 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 let _permit = permit;
 
                 if let Err(e) =
-                    save_request(&storage_inner, captured, Some(client_ip), max_bytes).await
+                    save_request(storage_inner.as_ref(), captured, Some(client_ip), max_bytes).await
                 {
                     error!("Failed to save request to database: {}", e);
                 }
@@ -151,56 +156,6 @@ async fn save_request(
     client_ip: Option<String>,
     max_body_bytes: usize,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // 1. Extract all metadata from the request before consuming it
-    let method = req.method().to_string();
-    let path = req.uri().path().to_string();
-
-    let content_length = req
-        .headers()
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<i64>().ok());
-
-    let content_type = req
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    let user_agent = req
-        .headers()
-        .get("user-agent")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    // Clone headers for the subsequent insertion loop
-    let headers: Vec<(String, String)> = req
-        .headers()
-        .iter()
-        .map(|(n, v)| (n.to_string(), v.to_str().unwrap_or("").to_string()))
-        .collect();
-
-    // 2. Collect the body bytes (I/O intensive part) - DO NOT hold a transaction yet
-    let body_bytes = crate::body_utils::collect_body_with_limit(req.into_body(), max_body_bytes)
-        .await
-        .map_err(|e| {
-            error!("Failed to read request body: {}", e);
-            e
-        })?;
-
-    // 3. Now start the transaction only when we have all data ready to be written
-    storage
-        .save_request(
-            method,
-            path,
-            content_length,
-            content_type,
-            user_agent,
-            headers,
-            Some(body_bytes.to_vec()),
-            client_ip,
-        )
-        .await?;
-
+    storage.save_request(req, client_ip, max_body_bytes).await?;
     Ok(())
 }
