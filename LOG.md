@@ -32,3 +32,12 @@ I decided to use different model and tested [glm-4.7-flash-mix](https://lmstudio
 When asked agent was able to prepare plan for adding support for DuckDB as alternative for SQLite. Process was split into two phases: refactoring of existing code - extracting trait for interacting with database and then adding feature and implementation backed by DuckDB. 
 Implementation of first phase went fairly well but some compilation errors were present. They were fixed in separate session to avoid context pollution.
 DuckDB support was added but implementation contained even more compilation errors and even tryin new sessions with prompt to fix compilation errors did not help and I eventually gave up on and decided to fix remaining issues by hand.
+
+## Raspberry Pi support
+Again I tried to use different models to add configuration and script that would build the service for Raspberry Pi 
+### GLM 4.7 Flash ([conversation](thread_dump/z.ai/glm-4.7-flash-mix/02_Cross%20Compiling%20My%Drive%20for%20Raspberry%20Pi.md))
+It quickly got stucked on repeating `<|observation|>` again and again while generating tokens.
+### Gemma 4 - 4b variant ([conversation](thread_dump/google/gemma-4-4b/01_Cross%20compile%20my%20drive%20project.md))
+After promising start LLM refused to use any provided tools to gather additional data and finally it requested me to provide it the solution.
+### Gemma 4 - 26b ([conversation](thread_dump/google/gemma-4-26b-a4b/17_Rust%20project%20cross%20compile%20setup.md))
+Finally this model was able to do the right job without any assistance and made no mistakes.
