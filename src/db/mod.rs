@@ -37,8 +37,7 @@ mod sqlite {
                 .connect_with(connection_options)
                 .await?;
 
-            let storage = Self { pool: pool.clone() };
-            storage.init().await?;
+            let storage = Self { pool: pool };
             Ok(storage)
         }
     }
@@ -48,6 +47,11 @@ mod sqlite {
     impl Storage for SqliteStorage {
         async fn init(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             // Initialize schema
+
+            use sqlx::{
+                SqlSafeStr,
+                migrate::{Migration, MigrationType::ReversibleUp, Migrator},
+            };
             sqlx::query(
                 "CREATE TABLE IF NOT EXISTS requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,10 +66,6 @@ mod sqlite {
             )
             .execute(&self.pool)
             .await?;
-
-            sqlx::query("ALTER TABLE requests ADD COLUMN IF NOT EXISTS query TEXT;")
-                .execute(&self.pool)
-                .await?;
 
             sqlx::query(
                 "CREATE TABLE IF NOT EXISTS request_headers (
@@ -90,6 +90,14 @@ mod sqlite {
             .execute(&self.pool)
             .await?;
 
+            let migrator = Migrator::with_migrations(vec![Migration::new(
+                1,
+                "add 'query' column".into(),
+                ReversibleUp,
+                "ALTER TABLE requests ADD COLUMN query TEXT;".into_sql_str(),
+                false,
+            )]);
+            migrator.run(&self.pool).await?;
             Ok(())
         }
 
