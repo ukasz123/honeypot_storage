@@ -41,3 +41,8 @@ It quickly got stucked on repeating `<|observation|>` again and again while gene
 After promising start LLM refused to use any provided tools to gather additional data and finally it requested me to provide it the solution.
 ### Gemma 4 - 26b ([conversation](thread_dump/google/gemma-4-26b-a4b/17_Rust%20project%20cross%20compile%20setup.md))
 Finally this model was able to do the right job without any assistance and made no mistakes.
+
+## Capturing `query` from requests 
+- [Initial attemp](thread_dump/google/gemma-4-26b-a4b/18_Adding%20Query%20Column%20to%20Requests%20Table.md) - Agent failed quickly when agent was started in "Write" mode; it tried to read too much and eventually failed to prepare and execute any reasonable plan
+- ["Ask" mode for plan](thread_dump/google/gemma-4-26b-a4b/19_Implementing%20Request%20Query%20Column%20Migrations.md) - It created plan with some incorrect steps but the first one was formed correctly. When asked to implement the first step (in "Write" mode) it ignored the fact it was supposed to support migration. After pointing out this issue it was able to correct itself and prepare migration. It even rejected (invalid) request to make the `query` collumn nullable. 👏 Unfortunately, it was unable to move on to the next part of the plan.
+- [Update "INSERT" statements](thread_dump/google/gemma-4-26b-a4b/20_Store%20URI%20query%20in%20database.md) - In "Write" mode I asked specifically what agent was supposed to do. It did necessary modifications in one go without any problems.
