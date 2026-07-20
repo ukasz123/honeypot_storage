@@ -63,6 +63,10 @@ mod sqlite {
             .execute(&self.pool)
             .await?;
 
+            sqlx::query("ALTER TABLE requests ADD COLUMN IF NOT EXISTS query TEXT;")
+                .execute(&self.pool)
+                .await?;
+
             sqlx::query(
                 "CREATE TABLE IF NOT EXISTS request_headers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,6 +102,7 @@ mod sqlite {
             // 1. Extract all metadata from the request before consuming it
             let method = req.method().to_string();
             let path = req.uri().path().to_string();
+            let query = req.uri().query().map(|q| q.to_string());
 
             let content_length = req
                 .headers()
@@ -137,11 +142,12 @@ mod sqlite {
             let mut tx = self.pool.begin().await?;
 
             let id: u32 = sqlx::query(
-            "INSERT INTO requests (method, path, content_length, content_type, user_agent, client_s_ip)
-             VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
+            "INSERT INTO requests (method, path, query, content_length, content_type, user_agent, client_s_ip)
+             VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
         )
         .bind(method)
         .bind(path)
+        .bind(query)
         .bind(content_length)
         .bind(content_type)
         .bind(user_agent)
@@ -228,6 +234,11 @@ mod duckdb {
                 FOREIGN KEY (request_id) REFERENCES requests (id)
             );",
             )?;
+
+            conn.execute(
+                "ALTER TABLE requests ADD COLUMN IF NOT EXISTS query TEXT;",
+                [],
+            )?;
             Ok(())
         }
 
@@ -239,6 +250,7 @@ mod duckdb {
         ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let method = req.method().to_string();
             let path = req.uri().path().to_string();
+            let query = req.uri().query().map(|q| q.to_string());
 
             let content_length = req
                 .headers()
@@ -279,11 +291,12 @@ mod duckdb {
             // For simplicity in this refactor, let's assume standard SQL approach.
             let tx = conn.transaction()?;
             let id: i64 = tx.query_row(
-            "INSERT INTO requests (method, path, content_length, content_type, user_agent, client_s_ip)
-             VALUES (?, ?, ?, ?, ?, ?) RETURNING *",
+            "INSERT INTO requests (method, path, query, content_length, content_type, user_agent, client_s_ip)
+             VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *",
             (
                 &method,
                 &path,
+                &query,
                 content_length,
                 &content_type,
                 &user_agent,
