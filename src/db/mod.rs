@@ -63,6 +63,10 @@ mod sqlite {
             .execute(&self.pool)
             .await?;
 
+            sqlx::query("ALTER TABLE requests ADD COLUMN IF NOT EXISTS query TEXT;")
+                .execute(&self.pool)
+                .await?;
+
             sqlx::query(
                 "CREATE TABLE IF NOT EXISTS request_headers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -227,6 +231,11 @@ mod duckdb {
                 body BLOB,
                 FOREIGN KEY (request_id) REFERENCES requests (id)
             );",
+            )?;
+
+            conn.execute(
+                "ALTER TABLE requests ADD COLUMN IF NOT EXISTS query TEXT;",
+                [],
             )?;
             Ok(())
         }
